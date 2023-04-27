@@ -3,10 +3,11 @@ package msgraphgocore
 import (
 	"context"
 	"errors"
-	abstractions "github.com/microsoft/kiota-abstractions-go"
-	"github.com/microsoft/kiota-abstractions-go/serialization"
 	"net/url"
 	"reflect"
+
+	abstractions "github.com/microsoft/kiota-abstractions-go"
+	"github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
 // PageIterator represents an iterator object that can be used to get subsequent pages of a collection.
@@ -23,6 +24,7 @@ type PageIterator[T interface{}] struct {
 type PageResult[T interface{}] struct {
 	oDataNextLink *string
 	value         []T
+	response      PageWithOdataNextLink
 }
 
 func (p *PageResult[T]) getValue() []T {
@@ -79,8 +81,14 @@ func NewPageIterator[T interface{}](res interface{}, reqAdapter abstractions.Req
 //	}
 //	err := pageIterator.Iterate(context.Background(), callbackFunc)
 func (pI *PageIterator[T]) Iterate(context context.Context, callback func(pageItem T) bool) error {
+	return pI.IterateResults(context, func(_ PageWithOdataNextLink) bool {
+		return pI.enumerate(callback)
+	})
+}
+
+func (pI *PageIterator[T]) IterateResults(context context.Context, callback func(pageResponse PageWithOdataNextLink) bool) error {
 	for {
-		keepIterating := pI.enumerate(callback)
+		keepIterating := callback(pI.currentPage.response)
 
 		if !keepIterating {
 			// Callback returned false, stop iterating through pages.
@@ -218,6 +226,7 @@ func convertToPage[T interface{}](response interface{}) (PageResult[T], error) {
 
 	page.oDataNextLink = parsablePage.GetOdataNextLink()
 	page.value = collected
+	page.response = parsablePage
 
 	return page, nil
 }
