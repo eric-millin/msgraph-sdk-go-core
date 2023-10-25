@@ -5,6 +5,7 @@ import (
 	"fmt"
 	nethttp "net/http"
 	httptest "net/http/httptest"
+	"reflect"
 	"strconv"
 	testing "testing"
 
@@ -202,7 +203,7 @@ func TestIterateCanBePausedAndResumed(t *testing.T) {
 
 					res = append(res, *item.GetId())
 
-					if *item.GetId() == "4" {
+					if *item.GetId() == "3" {
 						break
 					}
 				}
@@ -210,12 +211,12 @@ func TestIterateCanBePausedAndResumed(t *testing.T) {
 				pageIterator.Iterate(context.Background(), func(item internal.User) bool {
 					res = append(res, *item.GetId())
 
-					return *item.GetId() != "4"
+					return *item.GetId() != "3"
 				})
 			}
 
-			assert.Equal(t, res, []string{"0", "1", "2", "3", "4"})
-			assert.Equal(t, pageIterator.GetOdataNextLink(), response.GetOdataNextLink())
+			assert.Equal(t, res, []string{"0", "1", "2", "3"})
+			assert.Equal(t, mockPath, *pageIterator.GetOdataNextLink())
 
 			if tc.useNext {
 				for pageIterator.HasNext() {
@@ -232,7 +233,7 @@ func TestIterateCanBePausedAndResumed(t *testing.T) {
 				})
 			}
 
-			assert.Equal(t, res2, []string{"10"})
+			assert.Equal(t, res2, []string{"4", "10"})
 			assert.Empty(t, pageIterator.GetOdataNextLink())
 
 			if tc.useNext {
@@ -375,6 +376,42 @@ func TestHasNext(t *testing.T) {
 		return true
 	})
 	assert.False(t, pageIterator.HasNext())
+}
+
+func TestIterateOverEmptyValues(t *testing.T) {
+	var mockPath *string
+
+	callCt := 0
+	testServer := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, req *nethttp.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if callCt == 0 {
+			fmt.Fprint(w, `{"@odata.nextLink":"`+*mockPath+`","value": []}`)
+		} else {
+			fmt.Fprint(w, `{"@odata.deltaLink":"delta-page","value": []}`)
+		}
+		callCt++
+	}))
+	defer testServer.Close()
+
+	graphResponse := buildGraphResponse()
+	nextPath := testServer.URL + "/next-page"
+	mockPath = &nextPath
+	graphResponse.SetOdataNextLink(mockPath)
+
+	pageIterator, _ := NewPageIterator[internal.User](graphResponse, reqAdapter, ParsableDeltaCons)
+
+	iterCt := 0
+	err := pageIterator.Iterate(context.Background(), func(item internal.User) bool {
+		assert.False(t, reflect.ValueOf(item).IsZero())
+		iterCt++
+
+		return true
+	})
+	assert.NoError(t, err)
+
+	assert.Equal(t, *pageIterator.GetOdataDeltaLink(), "delta-page")
+	assert.Equal(t, 5, iterCt)
+	assert.Equal(t, 2, callCt)
 }
 
 func buildGraphResponse() *internal.UsersResponse {

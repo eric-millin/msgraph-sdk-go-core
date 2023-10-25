@@ -114,7 +114,11 @@ func (pI *PageIterator[T]) Next(context context.Context) (T, error) {
 		return val, errors.New("no more items to enumerate")
 	}
 
-	if pI.pauseIndex >= len(pI.currentPage.getValue()) {
+	val = pI.nextItem()
+
+	// keep going until the next page with non-empty values is reached
+	for pI.pauseIndex == len(pI.currentPage.getValue()) &&
+		pI.GetOdataNextLink() != nil && strings.TrimSpace(*pI.GetOdataNextLink()) != "" {
 		nextPage, err := pI.nextPage(context)
 		if err != nil {
 			return val, err
@@ -122,8 +126,6 @@ func (pI *PageIterator[T]) Next(context context.Context) (T, error) {
 		pI.currentPage = nextPage
 		pI.pauseIndex = 0 // when moving to the next page reset pauseIndex
 	}
-
-	val = pI.nextItem()
 
 	return val, nil
 }
@@ -263,7 +265,9 @@ func convertToPage[T interface{}](response interface{}) (PageResult[T], error) {
 	// This converts a graph slice ie []graph.User to a dynamic slice []interface{}
 	collected := make([]T, 0)
 	for i := 0; i < value.Len(); i++ {
-		collected = append(collected, value.Index(i).Interface().(T))
+		if val := value.Index(i).Interface(); val != nil {
+			collected = append(collected, val.(T))
+		}
 	}
 
 	parsablePage, ok := response.(PageWithOdataNextLink)
