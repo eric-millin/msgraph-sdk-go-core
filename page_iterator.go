@@ -19,6 +19,7 @@ type PageIterator[T interface{}] struct {
 	constructorFunc serialization.ParsableFactory
 	headers         *abstractions.RequestHeaders
 	reqOptions      []abstractions.RequestOption
+	nextResult      chan (func() (T, error))
 }
 
 // PageResult represents a page object built from a graph response object
@@ -64,7 +65,45 @@ func NewPageIterator[T interface{}](res interface{}, reqAdapter abstractions.Req
 		pauseIndex:      0,
 		constructorFunc: constructorFunc,
 		headers:         abstractions.NewRequestHeaders(),
+		nextResult:      make(chan (func() (T, error)), 1),
 	}, nil
+}
+
+// HasNext returns true if there are additional items to iterate.
+func (pI *PageIterator[T]) HasNext(context context.Context) bool {
+	var val T
+
+	if len(pI.nextResult) > 0 {
+		return true
+	}
+
+	if err := pI.moveToNext(context); err != nil {
+		pI.nextResult <- func() (T, error) { return val, err }
+		return true
+	}
+
+	val, ok := pI.nextItem()
+	if !ok {
+		return false
+	}
+
+	pI.nextResult <- func() (T, error) { return val, nil }
+
+	return true
+}
+
+// Next returns the next item from the current page and traverses any subsquent pages. It returns an error if the are
+// no more items to enumerate or something goes wrong.
+//
+// Example
+//
+//	pageIterator, err := NewPageIterator(resp, reqAdapter, parsableFactory)
+//	for pageIterator.HasNext() {
+//		item, err := pageIterator.Next()
+//		fmt.Println(*item.GetDisplayName())
+//	}
+func (pI *PageIterator[T]) Next() (T, error) {
+	return (<-pI.nextResult)()
 }
 
 // Iterate traverses all pages and enumerates all items in the current page and returns an error if something goes wrong.
@@ -82,8 +121,8 @@ func NewPageIterator[T interface{}](res interface{}, reqAdapter abstractions.Req
 //	}
 //	err := pageIterator.Iterate(context.Background(), callbackFunc)
 func (pI *PageIterator[T]) Iterate(context context.Context, callback func(pageItem T) bool) error {
-	for pI.HasNext() {
-		val, err := pI.Next(context)
+	for pI.HasNext(context) {
+		val, err := pI.Next()
 		if err != nil {
 			return err
 		}
@@ -94,40 +133,6 @@ func (pI *PageIterator[T]) Iterate(context context.Context, callback func(pageIt
 	}
 
 	return nil
-}
-
-// Next returns the next item from the current page and traverses any subsquent pages. It returns an error if the are
-// no more items to enumerate or something goes wrong.
-//
-// Example
-//
-//	pageIterator, err := NewPageIterator(resp, reqAdapter, parsableFactory)
-//	for pageIterator.HasNext() {
-//		item, err := pageIterator.Next()
-//		fmt.Println(*item.GetDisplayName())
-//	}
-func (pI *PageIterator[T]) Next(context context.Context) (T, error) {
-	var val T
-
-	// return if no more values or "next" pages to iterate
-	if !pI.HasNext() {
-		return val, errors.New("no more items to enumerate")
-	}
-
-	val = pI.nextItem()
-
-	// keep going until the next page with non-empty values is reached
-	for pI.pauseIndex == len(pI.currentPage.getValue()) &&
-		pI.GetOdataNextLink() != nil && strings.TrimSpace(*pI.GetOdataNextLink()) != "" {
-		nextPage, err := pI.nextPage(context)
-		if err != nil {
-			return val, err
-		}
-		pI.currentPage = nextPage
-		pI.pauseIndex = 0 // when moving to the next page reset pauseIndex
-	}
-
-	return val, nil
 }
 
 // All returns a slice containing the items from all pages. It returns an error if something goes wrong.
@@ -144,7 +149,6 @@ func (pI *PageIterator[T]) All(context context.Context) ([]T, error) {
 
 	err := pI.Iterate(context, func(pageItem T) bool {
 		vals = append(vals, pageItem)
-
 		return true
 	})
 
@@ -171,12 +175,6 @@ func (pI *PageIterator[T]) GetOdataNextLink() *string {
 // GetOdataDeltaLink returns the @odata.deltaLink value in current paged result.
 func (pI *PageIterator[T]) GetOdataDeltaLink() *string {
 	return pI.currentPage.oDataDeltaLink
-}
-
-// HasNext returns true if there are additional items to iterate.
-func (pI *PageIterator[T]) HasNext() bool {
-	return pI.pauseIndex < len(pI.currentPage.getValue()) ||
-		pI.GetOdataNextLink() != nil && strings.TrimSpace(*pI.GetOdataNextLink()) != ""
 }
 
 func (pI *PageIterator[T]) fetchNextPage(context context.Context) (serialization.Parsable, error) {
@@ -222,20 +220,34 @@ func (pI *PageIterator[T]) nextPage(context context.Context) (PageResult[T], err
 	return page, nil
 }
 
-func (pI *PageIterator[T]) nextItem() T {
+func (pI *PageIterator[T]) moveToNext(context context.Context) error {
+	for pI.pauseIndex >= len(pI.currentPage.getValue()) &&
+		pI.GetOdataNextLink() != nil && strings.TrimSpace(*pI.GetOdataNextLink()) != "" {
+		nextPage, err := pI.nextPage(context)
+		if err != nil {
+			return err
+		}
+		pI.currentPage = nextPage
+		pI.pauseIndex = 0 // when moving to the next page reset pauseIndex
+	}
+
+	return nil
+}
+
+func (pI *PageIterator[T]) nextItem() (T, bool) {
 	var val T
 
 	pageItems := pI.currentPage.getValue()
 
 	// the current page has no items to enumerate
 	if len(pageItems) == 0 || len(pageItems) <= pI.pauseIndex {
-		return val
+		return val, false
 	}
 
 	val = pageItems[pI.pauseIndex]
 	pI.pauseIndex++
 
-	return val
+	return val, true
 }
 
 // PageWithOdataNextLink represents a contract with the GetOdataNextLink() method
@@ -263,7 +275,7 @@ func convertToPage[T interface{}](response interface{}) (PageResult[T], error) {
 
 	// Collect all entities in the value slice.
 	// This converts a graph slice ie []graph.User to a dynamic slice []interface{}
-	collected := make([]T, 0)
+	collected := make([]T, 0, value.Len())
 	for i := 0; i < value.Len(); i++ {
 		if val := value.Index(i).Interface(); val != nil {
 			collected = append(collected, val.(T))

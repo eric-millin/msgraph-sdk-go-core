@@ -5,7 +5,6 @@ import (
 	"fmt"
 	nethttp "net/http"
 	httptest "net/http/httptest"
-	"reflect"
 	"strconv"
 	testing "testing"
 
@@ -139,8 +138,8 @@ func TestIterateEnumeratesAllPages(t *testing.T) {
 			res := make([]string, 0)
 
 			if tc.useNext {
-				for pageIterator.HasNext() {
-					item, err := pageIterator.Next(context.Background())
+				for pageIterator.HasNext(context.Background()) {
+					item, err := pageIterator.Next()
 					assert.NoError(t, err)
 					res = append(res, *item.GetId())
 				}
@@ -197,8 +196,8 @@ func TestIterateCanBePausedAndResumed(t *testing.T) {
 
 			pageIterator, _ := NewPageIterator[internal.User](response, reqAdapter, ParsableCons)
 			if tc.useNext {
-				for pageIterator.HasNext() {
-					item, err := pageIterator.Next(context.Background())
+				for pageIterator.HasNext(context.Background()) {
+					item, err := pageIterator.Next()
 					assert.NoError(t, err)
 
 					res = append(res, *item.GetId())
@@ -219,8 +218,8 @@ func TestIterateCanBePausedAndResumed(t *testing.T) {
 			assert.Equal(t, mockPath, *pageIterator.GetOdataNextLink())
 
 			if tc.useNext {
-				for pageIterator.HasNext() {
-					item, err := pageIterator.Next(context.Background())
+				for pageIterator.HasNext(context.Background()) {
+					item, err := pageIterator.Next()
 					assert.NoError(t, err)
 
 					res2 = append(res2, *item.GetId())
@@ -237,9 +236,7 @@ func TestIterateCanBePausedAndResumed(t *testing.T) {
 			assert.Empty(t, pageIterator.GetOdataNextLink())
 
 			if tc.useNext {
-				assert.False(t, pageIterator.HasNext())
-				_, err := pageIterator.Next(context.Background())
-				assert.Error(t, err)
+				assert.False(t, pageIterator.HasNext(context.Background()))
 			} else {
 				pageIterator.Iterate(context.Background(), func(item internal.User) bool {
 					assert.Fail(t, "Should not re-iterate over items")
@@ -366,16 +363,16 @@ func TestHasNext(t *testing.T) {
 	graphResponse.SetOdataNextLink(&mockPath)
 
 	pageIterator, _ := NewPageIterator[internal.User](graphResponse, reqAdapter, ParsableDeltaCons)
-	assert.True(t, pageIterator.HasNext())
+	assert.True(t, pageIterator.HasNext(context.Background()))
 	pageIterator.Iterate(context.Background(), func(item internal.User) bool {
 		return false
 	})
 
-	assert.True(t, pageIterator.HasNext())
+	assert.True(t, pageIterator.HasNext(context.Background()))
 	pageIterator.Iterate(context.Background(), func(item internal.User) bool {
 		return true
 	})
-	assert.False(t, pageIterator.HasNext())
+	assert.False(t, pageIterator.HasNext(context.Background()))
 }
 
 func TestIterateOverEmptyValues(t *testing.T) {
@@ -402,7 +399,7 @@ func TestIterateOverEmptyValues(t *testing.T) {
 
 	iterCt := 0
 	err := pageIterator.Iterate(context.Background(), func(item internal.User) bool {
-		assert.False(t, reflect.ValueOf(item).IsZero())
+		assert.NotZero(t, item)
 		iterCt++
 
 		return true
